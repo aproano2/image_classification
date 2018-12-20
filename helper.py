@@ -48,12 +48,12 @@ def test_data_loader(path, mean, std, batch_size):
     return torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True)
 
 
-def build_network(model_type, input_class=256, output_class=102):
+def build_network(model_type, hidden_units=256, output_class=102, dropout=0.2, lr=0.003):
     """
     Build and train a network
     Inputs:
         model_type: vgg16, densenet121, alexnet
-        input_class: input size of the classifier
+        hidden_units: input size of the classifier
         output_class: output size of the classifier
     Returns:
         model, criterion, optimizer
@@ -70,24 +70,24 @@ def build_network(model_type, input_class=256, output_class=102):
         model = models.alexnet(pretrained=True)
     else:
         print("No valid model found, please use 'vgg16', 'densenet121' or 'alexnet'")
-	return -1
+        return -1
     
     # Freeze parameters so we don't backprop through them
     for param in model.parameters():
         param.requires_grad = False    
     # Classifier
-    model.classifier = nn.Sequential(nn.Linear(model_options[model_type], input_class),
+    model.classifier = nn.Sequential(nn.Linear(model_options[model_type], hidden_units),
                                      nn.ReLU(),
-                                     nn.Dropout(0.2),
-                                     nn.Linear(input_class, output_class),
+                                     nn.Dropout(dropout),
+                                     nn.Linear(hidden_units, output_class),
                                      nn.LogSoftmax(dim=1))
     criterion = nn.NLLLoss()
     # Train the classifier parameters, feature parameters are frozen
-    optimizer = optim.Adam(model.classifier.parameters(), lr=0.003)
+    optimizer = optim.Adam(model.classifier.parameters(), lr=lr)
     return model, criterion, optimizer
 
 
-def eval_model(model, device, loader):
+def eval_model(model, device, loader, criterion):
     """
     This simple function evaluates a model
     
@@ -118,7 +118,7 @@ def eval_model(model, device, loader):
     return loss/len(loader), accuracy/len(loader)
 
 
-def test_model_accuracy(model, device, testloader):
+def test_model_accuracy(model, device, testloader, gpu=False):
     """
     This simple function gets the model accuracy
     Inputs:
@@ -129,7 +129,10 @@ def test_model_accuracy(model, device, testloader):
         accuracy: model accuracy
     """
     correct = 0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if gpu:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = "cpu"
     model.to(device)
     with torch.no_grad():
         for data in testloader:
@@ -144,7 +147,7 @@ def test_model_accuracy(model, device, testloader):
     return correct / len(testloader)
 
 
-def train_model(model, criterion, optimizer, number_epochs=10, print_every=10):
+def train_model(model, criterion, optimizer, trainloader, validloader, number_epochs=10, print_every=10, gpu=False):
     """
     Train the model
     Inputs:
@@ -154,7 +157,10 @@ def train_model(model, criterion, optimizer, number_epochs=10, print_every=10):
     Return:
         trained model
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if gpu:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = "cpu"
     model.to(device)
     steps = 0
     running_loss = 0
@@ -172,7 +178,7 @@ def train_model(model, criterion, optimizer, number_epochs=10, print_every=10):
             running_loss += loss.item()
             if steps % print_every == 0:
                 model.eval()
-                test_loss, accuracy = eval_model(model, device, validloader)                                
+                test_loss, accuracy = eval_model(model, device, validloader, criterion)                                
                 print(f"Epoch {epoch+1}/{number_epochs}.. "
                       f"Train loss: {running_loss/print_every:.3f}.. "
                       f"Test loss: {test_loss:.3f}.. "
@@ -182,28 +188,93 @@ def train_model(model, criterion, optimizer, number_epochs=10, print_every=10):
         return model
     
 
-def save_model(filename, model, train_data, model_type, input_class, output_class):
+def save_model(filename, model, train_data, model_type, hidden_units, output_class, dropout, lr):
     """
     Saves the model
     """
     model.class_to_idx = train_data.class_to_idx
     model.cpu
     torch.save({'structure': model,
-                'input_size_class': input_class,
+                'model_type': model_type,
+                'hidden_units': hidden_units,
                 'output_size_class': output_class,
                 'state_dict': model.state_dict(),
+                'dropout': dropout,
+                'lr': lr,
                 'class_to_idx': model.class_to_idx},
                 filename)
-
+    
 
 def load_model(path):
     """
     Loads the model
     """
     checkpoint = torch.load(path)
-    input_class = checkpoint['input_size_class']
+    model_type = checkpoint['model_type']    
+    hidden_units = checkpoint['hidden_units']
     output_class = checkpoint['output_size_class']
-    model,_,_ = build_network(input_class, output_class)
+    dropout = checkpoint['dropout']
+    lr = checkpoint['lr']
+    model,_,_ = build_network(model_type, hidden_units, output_class, dropout, lr)
     model.class_to_idx = checkpoint['class_to_idx']
     model.load_state_dict(checkpoint['state_dict'])
+    
     return model
+
+
+def process_image(image_path):
+    ''' Scales, crops, and normalizes a PIL image for a PyTorch model,
+        returns an Numpy array
+    '''
+    img = Image.open(image_path)   
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])])
+    return transform(img)
+
+
+def predict(image_path, model, topk=5, gpu=False):
+    """
+    Predict the class (or classes) of an image using a trained deep learning model.
+    """
+    if gpu:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = "cpu"
+    model.to(device)
+    img_torch = process_image(image_path)
+    img_torch = img_torch.unsqueeze_(0)
+    img_torch = img_torch.float()
+    if gpu and torch.cuda.is_available():
+        with torch.no_grad():
+            output = model.forward(img_torch.cuda())
+    else:
+        with torch.no_grad():
+            output = model.forward(img_torch)
+                
+    probability = F.softmax(output.data,dim=1)
+    
+    return probability.topk(topk)
+
+
+def show_results(ps, cl, topk=1, cat_to_name=None):
+    ''' Function for showing predicted classes.
+    '''
+    ps = ps.cpu().data.numpy().squeeze()
+    cl = cl.cpu().data.numpy().squeeze()
+    
+    if topk == 1:
+        ps = [ps]
+        cl = [cl]
+        print("The top prediction is:")
+    else:
+        print("The top {} predictions are:".format(len(ps)))
+
+    for x in range(len(ps)):
+        if cat_to_name:
+            print("Class: [{}] -- Probability: [{}]".format(cat_to_name[str(cl[x])], ps[x]))
+        else:
+            print("Class: [{}] -- Probability: [{}]".format(cl[x], ps[x]))
