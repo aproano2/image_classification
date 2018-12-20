@@ -245,6 +245,7 @@ def predict(image_path, model, topk=5, gpu=False):
     else:
         device = "cpu"
     model.to(device)
+    mode.eval()
     img_torch = process_image(image_path)
     img_torch = img_torch.unsqueeze_(0)
     img_torch = img_torch.float()
@@ -256,15 +257,17 @@ def predict(image_path, model, topk=5, gpu=False):
             output = model.forward(img_torch)
                 
     probability = F.softmax(output.data,dim=1)
-    
-    return probability.topk(topk)
+    ps, idx = probability.topk(topk)
+    ps = ps.cpu().data.numpy().squeeze()
+    idx = idx.cpu().data.numpy().squeeze()
+    idx_to_class = {v:k for k, v in model.class_to_idx.items()}
+    cls = [idx_to_class[i] for i in idx]
+    return ps, cls
 
 
 def show_results(ps, cl, topk=1, cat_to_name=None):
     ''' Function for showing predicted classes.
     '''
-    ps = ps.cpu().data.numpy().squeeze()
-    cl = cl.cpu().data.numpy().squeeze()
     
     if topk == 1:
         ps = [ps]
